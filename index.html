@@ -583,6 +583,7 @@ pre.sample{margin:0;padding:12px;border-radius:10px;background:#f4f7f6;border:1p
 .user-row .hint{font-size:12.5px;color:var(--muted)}
 @media (max-width:720px){.roles-mini{grid-template-columns:1fr}.user-row{grid-template-columns:1fr}.user-row .btn{margin-top:0}}
 .btn-block{width:100%;justify-content:center}
+.grow{flex:1}
 
 </style>
 </head>
@@ -1759,6 +1760,7 @@ function confirmarVenta() {
   closeAllModals();
   renderCart();
   ventaOkModal(v);
+  if (cfgTicket().imprimir === 'siempre') imprimirTicket(v);
 }
 function ventaOkModal(v) {
   const c = v.clienteId && cli(v.clienteId);
@@ -1769,9 +1771,33 @@ function ventaOkModal(v) {
       ${c ? `<p>Anotado en la cuenta de <b>${esc(c.nombre)}</b>. Ahora debe ${money(saldoCli(c.id))}.</p>` : ''}</div>
       ${c ? `<a class="btn w100" href="${esc(waLink(c.telefono, msgSaldo(c)))}" target="_blank" rel="noopener">${icon('msg')}Mandarle el saldo por WhatsApp</a>` : ''}
       <details class="tk"><summary>Ver ticket</summary>${ticketHTML(v)}</details>`,
-    foot: `<button class="btn btn-primary w100" data-act="modal-close" id="ok-next">Nueva venta</button>`,
+    foot: `<button class="btn" id="ok-print">${icon('printer')}Imprimir</button><button class="btn btn-primary grow" data-act="modal-close" id="ok-next">Nueva venta</button>`,
   });
+  m.el.querySelector('#ok-print').addEventListener('click', () => imprimirTicket(v));
   setTimeout(() => { const b = m.el.querySelector('#ok-next'); if (b && !isTouch()) b.focus(); }, 50);
+}
+/* ---------- Ticketera térmica (58 u 80 mm) ---------- */
+const cfgTicket = () => Object.assign({ imprimir: 'boton', ancho: 58 }, db.config.ticket || {});
+function imprimirTicket(v) {
+  const t = cfgTicket(), ancho = +t.ancho === 80 ? 80 : 58, util = ancho === 80 ? 72 : 48, fs = ancho === 80 ? 13 : 11;
+  const css = `@page{margin:0}html,body{margin:0;padding:0;background:#fff}
+    body{width:${util}mm;padding:1mm ${(ancho - util) / 2}mm 8mm;font-family:'Courier New',Consolas,monospace;font-size:${fs}px;line-height:1.35;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .ticket{border:0;box-shadow:none;padding:0;margin:0;max-width:none}
+    .t-head{display:flex;flex-direction:column;align-items:center;text-align:center;gap:1px;margin-bottom:6px}
+    .t-head img{width:${ancho === 80 ? 16 : 12}mm;filter:grayscale(1) contrast(1.5)}
+    .t-name{font-weight:700;font-size:${fs + 2}px}
+    .t-row{display:flex;justify-content:space-between;gap:6px}.t-row span:last-child{white-space:nowrap}
+    .t-sub{padding-left:8px;font-size:${fs - 1}px}.t-tot{font-weight:700;font-size:${fs + 3}px}
+    hr{border:0;border-top:1px dashed #000;margin:5px 0}.t-foot{text-align:center;margin-top:8px}`;
+  let f = document.getElementById('print-frame'); if (f) f.remove();
+  f = document.createElement('iframe'); f.id = 'print-frame'; f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none';
+  document.body.appendChild(f);
+  const d = f.contentDocument;
+  d.open(); d.write(`<!doctype html><html><head><meta charset="utf-8"><title>Ticket ${v.num}</title><style>${css}</style></head><body>${ticketHTML(v)}</body></html>`); d.close();
+  const go = () => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) { toast('No se pudo imprimir. Revisá que la ticketera esté prendida.', 'bad'); } setTimeout(refocusScan, 300); };
+  const img = d.querySelector('img');
+  if (img && !img.complete) { img.onload = go; img.onerror = go; } else setTimeout(go, 60);
 }
 function ticketHTML(v) {
   const n = db.config.negocio;
@@ -2258,8 +2284,9 @@ function ventaModal(id) {
     body: `${v.anulada ? '<div class="note-box bad">Esta venta está anulada. El stock volvió y no suma en los totales.</div>' : ''}
       <div class="info-list"><div><span>Fecha</span><b>${fDY(v.fecha)} ${fT(v.fecha)}</b></div><div><span>Pago</span><b>${MEDIOS[v.medio].t}</b></div>${c ? `<div><span>Cliente</span><b>${esc(c.nombre)}</b></div>` : ''}<div><span>Atendió</span><b>${esc(v.usuario || '—')}</b></div></div>
       ${ticketHTML(v)}`,
-    foot: `${!v.anulada && state.role === 'dueno' ? `<button class="btn btn-danger" id="vt-anular">${icon('xcircle')}Anular venta</button><span class="spacer"></span>` : ''}<button class="btn btn-primary" data-act="modal-close">Listo</button>`,
+    foot: `${!v.anulada && state.role === 'dueno' ? `<button class="btn btn-danger" id="vt-anular">${icon('xcircle')}Anular venta</button><span class="spacer"></span>` : ''}<button class="btn" id="vt-print">${icon('printer')}Imprimir</button><button class="btn btn-primary" data-act="modal-close">Listo</button>`,
   });
+  m.el.querySelector('#vt-print').addEventListener('click', () => imprimirTicket(v));
   const a = m.el.querySelector('#vt-anular');
   if (a) a.addEventListener('click', async () => {
     if (!(await confirmar({ title: `Anular ticket #${v.num}`, text: `Se descuenta ${money(v.total)} de las ventas y los productos vuelven al stock.${c ? ` También se le resta a la cuenta de ${c.nombre}.` : ''}`, ok: 'Anular venta', danger: true }))) return;
@@ -2860,6 +2887,13 @@ RENDER.configuracion = () => {
       </form>
       <div class="field mt"><label for="cb-test">Probar un código de balanza</label><input id="cb-test" data-in="cb-test" inputmode="numeric" placeholder="Ej: ${ej}" autocomplete="off"></div>
       <p class="hint mt" id="cb-res">Cada balanza arma el código a su manera; esto se ajusta el día de la instalación.</p></section>
+    <section class="card"><div class="card-head"><div><h2>Ticketera</h2><p class="sub">La impresora de tickets de la caja</p></div></div>
+      <form class="form" id="cfg-tk" novalidate>
+        <div class="grid-2"><div class="field"><label for="ct-imp">Al cobrar</label><select id="ct-imp"><option value="siempre"${cfgTicket().imprimir === 'siempre' ? ' selected' : ''}>Imprimir el ticket solo</option><option value="boton"${cfgTicket().imprimir !== 'siempre' ? ' selected' : ''}>Imprimir solo si lo piden</option></select></div>
+        <div class="field"><label for="ct-ancho">Ancho del papel</label><select id="ct-ancho"><option value="58"${+cfgTicket().ancho !== 80 ? ' selected' : ''}>58 mm (rollo chico)</option><option value="80"${+cfgTicket().ancho === 80 ? ' selected' : ''}>80 mm (rollo grande)</option></select></div></div>
+        <div class="head-actions"><button class="btn btn-primary" type="submit">Guardar</button><button class="btn" type="button" id="ct-test">${icon('printer')}Imprimir ticket de prueba</button></div>
+      </form>
+      <p class="hint mt">Este ajuste vale para todos los equipos. El ticket no es factura: si el cliente la pide, se hace aparte.</p></section>
     <section class="card"><div class="card-head"><div><h2>Conexión</h2><p class="sub">Dónde se guardan los datos</p></div></div>
       <div class="info-list"><div><span>Base de datos</span><b class="mono">${esc((conexion() || {}).url || '')}</b></div><div><span>Entraste como</span><b>${esc(yo ? yo.email : '')}</b></div></div>
       <p class="muted mt">Las ventas, la caja, los clientes y los productos quedan en la nube. Si se corta internet, se sigue trabajando y se sube todo cuando vuelve.</p>
@@ -2880,6 +2914,16 @@ AFTER.configuracion = () => {
     if (!(mg >= 0)) { fieldErr(document, 'cp-mg', 'Escribí un porcentaje'); return; }
     db.config.margen = mg; db.config.redondeo = +g('cp-red').value; db.config.fondo = Math.round(parseNum(g('cp-fondo').value) || 0);
     persist(); toast('Guardado');
+  });
+  g('cfg-tk').addEventListener('submit', e => {
+    e.preventDefault();
+    db.config.ticket = { imprimir: g('ct-imp').value, ancho: +g('ct-ancho').value };
+    persist(); toast('Ticketera configurada');
+  });
+  g('ct-test').addEventListener('click', () => {
+    db.config.ticket = { imprimir: g('ct-imp').value, ancho: +g('ct-ancho').value };
+    const p = db.productos[0];
+    imprimirTicket({ num: 0, fecha: new Date().toISOString(), items: [{ nombre: p ? p.nombre : 'Producto de prueba', precio: p ? p.precio : 1000, cantidad: 2, unidad: 'u' }, { nombre: 'Jamón cocido', precio: 14000, cantidad: 0.25, unidad: 'kg' }], total: (p ? p.precio : 1000) * 2 + 3500, medio: 'efectivo', pagaCon: 20000, vuelto: 20000 - ((p ? p.precio : 1000) * 2 + 3500) });
   });
   g('cfg-bal').addEventListener('submit', e => {
     e.preventDefault();
