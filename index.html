@@ -582,6 +582,7 @@ pre.sample{margin:0;padding:12px;border-radius:10px;background:#f4f7f6;border:1p
 .user-row .btn{margin-top:23px}
 .user-row .hint{font-size:12.5px;color:var(--muted)}
 @media (max-width:720px){.roles-mini{grid-template-columns:1fr}.user-row{grid-template-columns:1fr}.user-row .btn{margin-top:0}}
+.btn-block{width:100%;justify-content:center}
 
 </style>
 </head>
@@ -1489,7 +1490,11 @@ window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTi
 const cartTotal = () => sum(state.cart, lineTotal);
 const cartCount = () => sum(state.cart, l => l.unidad === 'kg' ? 1 : l.cantidad);
 RENDER.caja = () => {
-  const quick = db.productos.filter(p => p.unidad === 'kg' || /^\d{1,5}$/.test(p.codigo)).slice(0, 16);
+  // Botones rápidos: lo que se vende por peso y lo que no tiene código de barras, primero lo más vendido
+  const desde = addDays(new Date(), -30).toISOString(), vendidos = {};
+  db.ventas.forEach(v => { if (!v.anulada && v.fecha >= desde) (v.items || []).forEach(i => { if (i.pid) vendidos[i.pid] = (vendidos[i.pid] || 0) + 1; }); });
+  const quick = db.productos.filter(p => p.unidad === 'kg' || (/^\d{1,5}$/.test(p.codigo) && (vendidos[p.id] || +p.codigo < 5001)))
+    .sort((a, b) => (b.unidad === 'kg') - (a.unidad === 'kg') || (vendidos[b.id] || 0) - (vendidos[a.id] || 0)).slice(0, 16);
   return `
   <div class="pos">
     <div class="pos-main">
@@ -1558,7 +1563,7 @@ function addItem(p, cantidad) {
   if (i >= 0) { c[i].cantidad += cantidad || 1; state.cartFlash = i; }
   else { c.push({ pid: p.id, nombre: p.nombre, precio: p.precio, costo: p.costo, unidad: p.unidad, cantidad: cantidad || 1 }); state.cartFlash = c.length - 1; }
   renderCart();
-  if (p.stock <= 0) toast(`${p.nombre} figura sin stock. Revisalo en Stock.`, 'warn');
+  if (p.stock <= 0 && p.min > 0) toast(`${p.nombre} figura sin stock. Revisalo en Stock.`, 'warn'); // solo si ya se le cargó un stock mínimo
   refocusScan();
 }
 function pesoModal(p, idx = null) {
@@ -1622,9 +1627,11 @@ function variosModal() {
 function codigoNoEncontrado(code, ctx) {
   const m = openModal({
     title: 'Producto sin cargar', size: 'sm',
-    body: `<p>El código <b class="mono">${esc(code)}</b> todavía no está en el sistema.</p><p class="muted">Cargalo ahora: tarda unos segundos y la próxima vez ya aparece solo.</p>`,
+    body: `<p>El código <b class="mono">${esc(code)}</b> todavía no está en el sistema.</p><p class="muted">Si el producto ya está cargado pero sin código de barras, elegilo en la lista y queda unido. Si no, cargalo nuevo: la próxima vez aparece solo.</p>
+      <button class="btn btn-block mt" id="nf-asignar">${icon('search')}Ya está cargado: elegirlo de la lista</button>`,
     foot: `${ctx === 'caja' ? '<button class="btn" id="nf-varios">Cobrar como varios</button>' : '<button class="btn" data-act="modal-close">Cancelar</button>'}<button class="btn btn-primary" id="nf-cargar">${icon('plus')}Cargar producto</button>`,
   });
+  m.el.querySelector('#nf-asignar').addEventListener('click', () => { closeModal(); asignarCodigoModal(code, ctx); });
   m.el.querySelector('#nf-cargar').addEventListener('click', () => {
     closeModal();
     productoForm(null, {
@@ -1633,6 +1640,36 @@ function codigoNoEncontrado(code, ctx) {
     });
   });
   const v = m.el.querySelector('#nf-varios'); if (v) v.addEventListener('click', () => { closeModal(); variosModal(); });
+}
+// Productos importados sin código de barras: al escanearlos por primera vez se les pone el código
+const sinCodigoReal = p => !/^\d{8,}$/.test(p.codigo);
+function asignarCodigoModal(code, ctx) {
+  const m = openModal({
+    title: '¿Qué producto es?', size: 'sm',
+    body: `<p class="muted">Elegí el producto y le queda el código <b class="mono">${esc(code)}</b>.</p>
+      <input id="ac-q" placeholder="Escribí parte del nombre" autocomplete="off" aria-label="Buscar producto"><div class="cli-pick mt" id="ac-list" style="max-height:340px"></div>`,
+    foot: `<button class="btn" data-act="modal-close">Cancelar</button>`,
+  });
+  const q = m.el.querySelector('#ac-q');
+  const draw = () => {
+    const v = q.value.trim();
+    const lista = (v.length >= 2 ? searchProducts(v, 40) : db.productos.filter(sinCodigoReal).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')).slice(0, 40));
+    m.el.querySelector('#ac-list').innerHTML = lista.map(p => `<button type="button" class="cli-opt" data-id="${p.id}"><span>${esc(p.nombre)}<small>${sinCodigoReal(p) ? 'Sin código de barras' : 'Código ' + esc(p.codigo)}</small></span><span class="num">${money(p.precio)}</span></button>`).join('')
+      || `<p class="muted">${v.length >= 2 ? 'No hay productos con ese nombre.' : 'Todos los productos ya tienen código. Escribí el nombre para buscar.'}</p>`;
+  };
+  q.addEventListener('input', draw);
+  m.el.querySelector('#ac-list').addEventListener('click', async e => {
+    const b = e.target.closest('[data-id]'); if (!b) return;
+    const p = prod(+b.dataset.id); if (!p) return;
+    if (!sinCodigoReal(p) && !(await confirmar({ title: 'Cambiar el código', text: `${p.nombre} ya tiene el código ${p.codigo}. ¿Lo reemplazo por ${code}?`, ok: 'Reemplazar' }))) return;
+    p.codigo = code; persist();
+    closeAllModals();
+    toast(`Listo: ${p.nombre} ya tiene su código`);
+    if (ctx === 'caja') addItem(p);
+    else if (ctx === 'compra') addCompraLine(p);
+    else refresh();
+  });
+  draw(); setTimeout(() => q.focus(), 30);
 }
 function sugerenciasPago(t) {
   const s = new Set([t]);
@@ -1995,7 +2032,7 @@ function parseCSV(text) {
 }
 function filasImport(text) {
   const rows = parseCSV(text); if (!rows.length) return [];
-  const cols = ['codigo', 'nombre', 'categoria', 'costo', 'precio', 'stock'];
+  const cols = ['codigo', 'nombre', 'categoria', 'proveedor', 'unidad', 'costo', 'precio', 'stock'];
   let idx = { codigo: 0, nombre: 1, categoria: 2, costo: 3, precio: 4, stock: 5 }, start = 0;
   const h = rows[0].map(norm);
   if (h.some(x => x.includes('nombre') || x.includes('codigo') || x.includes('precio'))) {
@@ -2006,9 +2043,10 @@ function filasImport(text) {
     const get = c => idx[c] != null ? (r[idx[c]] || '').trim() : '';
     const costo = parseNum(get('costo')), precioRaw = parseNum(get('precio'));
     const precio = precioRaw > 0 ? precioRaw : (costo > 0 ? roundPrice(costo * (1 + db.config.margen / 100)) : NaN);
-    const it = { codigo: get('codigo'), nombre: get('nombre'), categoria: get('categoria') || 'Almacén', costo: costo > 0 ? Math.round(costo) : 0, precio: Math.round(precio), stock: parseNum(get('stock'), true) || 0 };
+    const und = norm(get('unidad'));
+    const it = { codigo: get('codigo'), nombre: get('nombre'), categoria: get('categoria') || 'Almacén', proveedor: get('proveedor'), unidad: und ? (/^(kg|kilo)/.test(und) ? 'kg' : 'u') : '', costo: costo > 0 ? Math.round(costo) : 0, precio: Math.round(precio), stock: parseNum(get('stock'), true) || 0 };
     it.ok = !!it.nombre && precio > 0;
-    it.existe = it.codigo ? findByCode(it.codigo) : null;
+    it.existe = it.codigo ? findByCode(it.codigo) : (it.nombre ? db.productos.find(p => norm(p.nombre) === norm(it.nombre)) || null : null);
     return it;
   });
 }
@@ -2019,7 +2057,7 @@ function importModal() {
     `${ean13('779864213579')};Caldo Knorr verdura x 12;Almacén;1400;1950;10`].join('\n');
   const m = openModal({
     title: 'Importar lista de productos', size: 'lg',
-    body: `<p class="muted">Si tenés los productos en Excel, guardalo como CSV (Archivo › Guardar como › CSV) y subilo acá. Columnas: código, nombre, categoría, costo, precio y stock. Si el código ya existe, se actualiza ese producto.</p>
+    body: `<p class="muted">Si tenés los productos en Excel, guardalo como CSV (Archivo › Guardar como › CSV) y subilo acá. Columnas: código, nombre, categoría, proveedor, unidad (unidad o kg), costo, precio y stock. Alcanza con nombre y precio: el código de barras se le pone la primera vez que se escanea. Si el producto ya existe (mismo código o mismo nombre), se actualiza.</p>
       <div class="field"><label for="im-file">Archivo CSV</label><input id="im-file" type="file" accept=".csv,.txt,text/csv"></div>
       <div class="field"><label for="im-txt">O pegá la lista acá</label><textarea id="im-txt" rows="5" placeholder="codigo;nombre;categoria;costo;precio;stock"></textarea></div>
       <div class="input-row"><button type="button" class="btn btn-sm" id="im-ej">Usar un ejemplo</button><button type="button" class="btn btn-sm" id="im-copy">${icon('copy')}Copiar formato</button></div>
@@ -2040,15 +2078,22 @@ function importModal() {
   g('im-ej').addEventListener('click', () => { g('im-txt').value = ejemplo; prev(); });
   g('im-copy').addEventListener('click', () => copiar(ejemplo));
   g('im-ok').addEventListener('click', () => {
-    const now = new Date().toISOString(); let n = 0;
+    const now = new Date().toISOString(); let n = 0, provNuevos = 0;
+    const provDe = nombre => {
+      let pv = db.proveedores.find(v => norm(v.nombre) === norm(nombre));
+      if (!pv) { pv = { id: nextId('proveedor'), nombre, rubro: '', contacto: '', telefono: '', dias: [], notas: '' }; db.proveedores.push(pv); provNuevos++; }
+      return pv.id;
+    };
     filas.filter(f => f.ok).forEach(f => {
       if (!db.categorias.includes(f.categoria)) db.categorias.push(f.categoria);
       const data = { nombre: f.nombre, categoria: f.categoria, costo: f.costo, precio: f.precio };
+      if (f.proveedor) data.proveedorId = provDe(f.proveedor);
+      if (f.unidad) data.unidad = f.unidad;
       if (f.existe) { const p = f.existe; if (p.precio !== f.precio) data.actualizado = now; Object.assign(p, data); if (f.stock) p.stock = f.stock; }
-      else db.productos.push({ id: nextId('producto'), codigo: f.codigo || genCodigo(), ...data, proveedorId: null, unidad: 'u', stock: f.stock, min: 0, vence: null, actualizado: now, creado: now });
+      else db.productos.push({ id: nextId('producto'), codigo: f.codigo || genCodigo(), proveedorId: null, unidad: 'u', ...data, stock: f.stock, min: 0, vence: null, actualizado: now, creado: now });
       n++;
     });
-    persist(); closeModal(); refresh(); toast(`${n} productos importados`);
+    persist(); closeModal(); refresh(); toast(`${n} productos importados${provNuevos ? ` · ${provNuevos} proveedores nuevos` : ''}`);
   });
 }
 
