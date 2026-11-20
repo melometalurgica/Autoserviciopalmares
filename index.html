@@ -584,6 +584,10 @@ pre.sample{margin:0;padding:12px;border-radius:10px;background:#f4f7f6;border:1p
 @media (max-width:720px){.roles-mini{grid-template-columns:1fr}.user-row{grid-template-columns:1fr}.user-row .btn{margin-top:0}}
 .btn-block{width:100%;justify-content:center}
 .grow{flex:1}
+.preview details{border-top:1px solid var(--line-soft);padding-top:8px}
+.preview details summary{cursor:pointer;font-size:14px}
+.preview details p{margin:4px 0 6px;font-size:13px}
+.preview details .pv-row{padding:2px 0}
 
 </style>
 </head>
@@ -2056,6 +2060,48 @@ function parseCSV(text) {
   const split = l => { const out = []; let cur = '', q = false; for (let i = 0; i < l.length; i++) { const ch = l[i]; if (ch === '"') { if (q && l[i + 1] === '"') { cur += '"'; i++; } else q = !q; } else if (ch === delim && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map(s => s.trim()); };
   return lines.map(split);
 }
+const nomKey = s => norm(s).replace(/\s+/g, ' ');
+/* Modo "solo códigos": archivo con código y nombre, sin precio. Completa el código de barras
+   de los productos que ya están en el sistema sin código real. Nunca crea ni borra productos,
+   nunca toca precios, y nunca pisa un código que ya se escaneó. */
+function soloCodigos(text) {
+  const rows = parseCSV(text); if (rows.length < 2) return null;
+  const h = rows[0].map(norm);
+  const ic = h.findIndex(x => x.includes('codigo')), inn = h.findIndex(x => x.includes('nombre') || x.includes('producto') || x.includes('descripcion')), ist = h.findIndex(x => x.includes('stock'));
+  if (ic < 0 || inn < 0 || h.some(x => x.includes('precio') || x.includes('costo'))) return null;
+  const porNombre = new Map(); db.productos.forEach(p => { const k = nomKey(p.nombre); if (!porNombre.has(k)) porNombre.set(k, p); });
+  const usados = new Set(), codigosUsados = new Set();
+  return rows.slice(1).map(r => {
+    const codigo = String(r[ic] || '').replace(/\D/g, ''), nombre = String(r[inn] || '').trim();
+    const it = { codigo, nombre, p: null, estado: 'mal', stock: ist >= 0 ? parseNum(r[ist], true) || 0 : 0 };
+    if (!/^\d{8,14}$/.test(codigo) || !nombre || codigosUsados.has(codigo)) return it;
+    codigosUsados.add(codigo);
+    const conCodigo = db.productos.find(x => x.codigo === codigo);
+    if (conCodigo) { it.p = conCodigo; it.estado = 'ya'; return it; }
+    const p = porNombre.get(nomKey(nombre));
+    if (!p) { it.estado = 'noesta'; return it; }
+    it.p = p;
+    if (!sinCodigoReal(p)) it.estado = 'otro';
+    else if (usados.has(p.id)) it.estado = 'mal';
+    else { it.estado = 'asigna'; usados.add(p.id); }
+    return it;
+  });
+}
+const ESTADOS_COD = [
+  ['asigna', 'Se les pone el código', 'Estaban cargados sin código de barras.'],
+  ['ya', 'Ya tienen ese código', 'No se tocan.'],
+  ['otro', 'Ya tienen otro código escaneado', 'Se respeta el que escaneaste. Si querés, revisalos a mano.'],
+  ['noesta', 'No están en el sistema con ese nombre', 'Se saltean: no se crean productos nuevos porque no tienen precio.'],
+  ['mal', 'Datos incompletos o repetidos', 'Se saltean.'],
+];
+const conStock = f => f.p && f.stock > 0 && !(Number(f.p.stock) > 0) && ['asigna', 'ya', 'otro'].includes(f.estado);
+function previewCodigos(filas) {
+  const ns = filas.filter(conStock).length;
+  return `<div class="preview"><b>Modo códigos de barras: no se crean ni se borran productos, y no se tocan precios.</b>${ns ? `<span>Stock: a <b>${ns}</b> productos que tienen 0 se les carga el stock del archivo. Los que ya tienen stock quedan como están.</span>` : ''}${ESTADOS_COD.map(([k, t, d]) => {
+    const fs = filas.filter(f => f.estado === k); if (!fs.length) return '';
+    return `<details${k === 'asigna' ? ' open' : ''}><summary><b>${fs.length}</b> · ${t}</summary><p class="muted">${d}</p>${fs.slice(0, 300).map(f => `<div class="pv-row"><span>${esc(f.p ? f.p.nombre : f.nombre)}</span><b class="mono">${k === 'otro' ? esc(f.p.codigo) + ' <span class="arrow">(archivo: ' + esc(f.codigo) + ')</span>' : esc(f.codigo)}</b></div>`).join('')}</details>`;
+  }).join('')}</div>`;
+}
 function filasImport(text) {
   const rows = parseCSV(text); if (!rows.length) return [];
   const cols = ['codigo', 'nombre', 'categoria', 'proveedor', 'unidad', 'costo', 'precio', 'stock'];
@@ -2072,7 +2118,7 @@ function filasImport(text) {
     const und = norm(get('unidad'));
     const it = { codigo: get('codigo'), nombre: get('nombre'), categoria: get('categoria') || 'Almacén', proveedor: get('proveedor'), unidad: und ? (/^(kg|kilo)/.test(und) ? 'kg' : 'u') : '', costo: costo > 0 ? Math.round(costo) : 0, precio: Math.round(precio), stock: parseNum(get('stock'), true) || 0 };
     it.ok = !!it.nombre && precio > 0;
-    it.existe = it.codigo ? findByCode(it.codigo) : (it.nombre ? db.productos.find(p => norm(p.nombre) === norm(it.nombre)) || null : null);
+    it.existe = (it.codigo && findByCode(it.codigo)) || (it.nombre ? db.productos.find(p => nomKey(p.nombre) === nomKey(it.nombre)) || null : null);
     return it;
   });
 }
@@ -2083,7 +2129,7 @@ function importModal() {
     `${ean13('779864213579')};Caldo Knorr verdura x 12;Almacén;1400;1950;10`].join('\n');
   const m = openModal({
     title: 'Importar lista de productos', size: 'lg',
-    body: `<p class="muted">Si tenés los productos en Excel, guardalo como CSV (Archivo › Guardar como › CSV) y subilo acá. Columnas: código, nombre, categoría, proveedor, unidad (unidad o kg), costo, precio y stock. Alcanza con nombre y precio: el código de barras se le pone la primera vez que se escanea. Si el producto ya existe (mismo código o mismo nombre), se actualiza.</p>
+    body: `<p class="muted">Si tenés los productos en Excel, guardalo como CSV (Archivo › Guardar como › CSV) y subilo acá. Columnas: código, nombre, categoría, proveedor, unidad (unidad o kg), costo, precio y stock. Alcanza con nombre y precio: el código de barras se le pone la primera vez que se escanea. Si el producto ya existe (mismo código o mismo nombre), se actualiza. Importar nunca borra productos.</p><p class="muted"><b>Solo códigos de barras:</b> si el archivo tiene las columnas <span class="mono">codigo;nombre</span> (y opcional <span class="mono">stock</span>), sin precio, se completa el código de los productos que todavía no lo tienen, buscándolos por nombre. Lo que ya escaneaste no se toca, y el stock solo se carga en los que tienen 0.</p>
       <div class="field"><label for="im-file">Archivo CSV</label><input id="im-file" type="file" accept=".csv,.txt,text/csv"></div>
       <div class="field"><label for="im-txt">O pegá la lista acá</label><textarea id="im-txt" rows="5" placeholder="codigo;nombre;categoria;costo;precio;stock"></textarea></div>
       <div class="input-row"><button type="button" class="btn btn-sm" id="im-ej">Usar un ejemplo</button><button type="button" class="btn btn-sm" id="im-copy">${icon('copy')}Copiar formato</button></div>
@@ -2092,8 +2138,19 @@ function importModal() {
   });
   const g = id => m.el.querySelector('#' + id);
   let filas = [];
+  let modo = 'productos';
   const prev = () => {
-    filas = filasImport(g('im-txt').value);
+    const txt = g('im-txt').value;
+    if (txt.startsWith('PK')) { filas = []; g('im-ok').disabled = true; g('im-prev').innerHTML = '<div class="preview"><b>⚠ Ese archivo es un Excel (.xlsx).</b> Abrilo en Excel y guardalo como CSV: Archivo › Guardar como › CSV (delimitado por comas).</div>'; return; }
+    const cod = soloCodigos(txt);
+    if (cod) {
+      modo = 'codigos'; filas = cod;
+      const n = cod.filter(f => f.estado === 'asigna').length, ns = cod.filter(conStock).length;
+      g('im-ok').disabled = !n && !ns; g('im-ok').textContent = n || ns ? [n ? `Poner ${n} códigos` : '', ns ? `stock a ${ns}` : ''].filter(Boolean).join(' y ') : 'Nada para cargar';
+      g('im-prev').innerHTML = previewCodigos(cod); return;
+    }
+    modo = 'productos';
+    filas = filasImport(txt);
     const ok = filas.filter(f => f.ok), nuevos = ok.filter(f => !f.existe).length, upd = ok.length - nuevos, mal = filas.length - ok.length;
     g('im-ok').disabled = !ok.length;
     g('im-ok').textContent = ok.length ? `Importar ${ok.length} productos` : 'Importar';
@@ -2105,6 +2162,14 @@ function importModal() {
   g('im-copy').addEventListener('click', () => copiar(ejemplo));
   g('im-ok').addEventListener('click', () => {
     const now = new Date().toISOString(); let n = 0, provNuevos = 0;
+    if (modo === 'codigos') {
+      let ns = 0;
+      filas.forEach(f => {
+        if (conStock(f)) { f.p.stock = f.stock; ns++; }
+        if (f.estado === 'asigna' && sinCodigoReal(f.p) && !db.productos.some(x => x.codigo === f.codigo)) { f.p.codigo = f.codigo; n++; }
+      });
+      persist(); closeModal(); refresh(); toast(`Listo: ${n} códigos de barras${ns ? ` · stock cargado a ${ns}` : ''}`); return;
+    }
     const provDe = nombre => {
       let pv = db.proveedores.find(v => norm(v.nombre) === norm(nombre));
       if (!pv) { pv = { id: nextId('proveedor'), nombre, rubro: '', contacto: '', telefono: '', dias: [], notas: '' }; db.proveedores.push(pv); provNuevos++; }
@@ -2115,7 +2180,7 @@ function importModal() {
       const data = { nombre: f.nombre, categoria: f.categoria, costo: f.costo, precio: f.precio };
       if (f.proveedor) data.proveedorId = provDe(f.proveedor);
       if (f.unidad) data.unidad = f.unidad;
-      if (f.existe) { const p = f.existe; if (p.precio !== f.precio) data.actualizado = now; Object.assign(p, data); if (f.stock) p.stock = f.stock; }
+      if (f.existe) { const p = f.existe; if (p.precio !== f.precio) data.actualizado = now; Object.assign(p, data); if (f.stock) p.stock = f.stock; if (/^\d{8,}$/.test(f.codigo) && sinCodigoReal(p) && !findByCode(f.codigo)) p.codigo = f.codigo; }
       else db.productos.push({ id: nextId('producto'), codigo: f.codigo || genCodigo(), proveedorId: null, unidad: 'u', ...data, stock: f.stock, min: 0, vence: null, actualizado: now, creado: now });
       n++;
     });
